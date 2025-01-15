@@ -61,6 +61,478 @@
 #include "vdo-frame.h"
 #include "vdo-types.h"
 
+// FOR AXOVERLAY
+#ifdef ENABLE_OVERLAY
+#include <axoverlay.h>
+#include <cairo/cairo.h>
+#include <math.h>
+#endif
+
+// GLOBALS OBJDETECTION
+// TODO: COPIED OUT OF MAIN
+// Hardcode to use three image "color" channels (eg. RGB).
+const unsigned int CHANNELS = 3;
+// Hardcode to set output bytes of four tensors from MobileNet V2 model.
+const unsigned int FLOATSIZE   = 4;
+const unsigned int TENSOR1SIZE = 80 * FLOATSIZE;
+const unsigned int TENSOR2SIZE = 20 * FLOATSIZE;
+const unsigned int TENSOR3SIZE = 20 * FLOATSIZE;
+const unsigned int TENSOR4SIZE = 1 * FLOATSIZE;
+
+// Name patterns for the temp file we will create.
+
+// Pre-processing of the High resolution frame input and output
+char PP_HD_INPUT_FILE_PATTERN[]  = "/tmp/larod.pp.hd.test-XXXXXX";
+char PP_HD_OUTPUT_FILE_PATTERN[] = "/tmp/larod.pp.hd.out.test-XXXXXX";
+
+// Pre-processing of the Low resolution frame input and output
+// The output of the pre-processing correspond with the input of the object detector
+char PP_SD_INPUT_FILE_PATTERN[]           = "/tmp/larod.pp.test-XXXXXX";
+char OBJECT_DETECTOR_INPUT_FILE_PATTERN[] = "/tmp/larod.in.test-XXXXXX";
+
+char OBJECT_DETECTOR_OUT1_FILE_PATTERN[] = "/tmp/larod.out1.test-XXXXXX";
+char OBJECT_DETECTOR_OUT2_FILE_PATTERN[] = "/tmp/larod.out2.test-XXXXXX";
+char OBJECT_DETECTOR_OUT3_FILE_PATTERN[] = "/tmp/larod.out3.test-XXXXXX";
+char OBJECT_DETECTOR_OUT4_FILE_PATTERN[] = "/tmp/larod.out4.test-XXXXXX";
+
+bool ret                        = false;
+ImgProvider_t* sdImageProvider  = NULL;
+ImgProvider_t* hdImageProvider  = NULL;
+larodError* error               = NULL;
+larodConnection* conn           = NULL;
+larodMap* ppMap                 = NULL;
+larodMap* cropMap               = NULL;
+larodMap* ppMapHD               = NULL;
+larodModel* ppModel             = NULL;
+larodModel* ppModelHD           = NULL;
+larodModel* model               = NULL;
+larodTensor** ppInputTensors    = NULL;
+size_t ppNumInputs              = 0;
+larodTensor** ppOutputTensors   = NULL;
+size_t ppNumOutputs             = 0;
+larodTensor** ppInputTensorsHD  = NULL;
+size_t ppNumInputsHD            = 0;
+larodTensor** ppOutputTensorsHD = NULL;
+size_t ppNumOutputsHD           = 0;
+larodTensor** inputTensors      = NULL;
+size_t numInputs                = 0;
+larodTensor** outputTensors     = NULL;
+size_t numOutputs               = 0;
+larodJobRequest* ppReq          = NULL;
+larodJobRequest* ppReqHD        = NULL;
+larodJobRequest* infReq         = NULL;
+void* cropAddr                  = NULL;
+void* ppInputAddr               = MAP_FAILED;
+void* ppInputAddrHD             = MAP_FAILED;
+void* ppOutputAddrHD            = MAP_FAILED;
+void* larodInputAddr            = MAP_FAILED;  // this address is both used for the output of the
+                                               // preprocessing and input for the inference
+void* larodOutput1Addr = MAP_FAILED;
+void* larodOutput2Addr = MAP_FAILED;
+void* larodOutput3Addr = MAP_FAILED;
+void* larodOutput4Addr = MAP_FAILED;
+int larodModelFd       = -1;
+int ppInputFd          = -1;
+int ppInputFdHD        = -1;
+int ppOutputFdHD       = -1;
+int larodInputFd       = -1;  // This file descriptor is used for both as output for the pre
+                              // processing and input for the inference
+int larodOutput1Fd = -1;
+int larodOutput2Fd = -1;
+int larodOutput3Fd = -1;
+int larodOutput4Fd = -1;
+char** labels      = NULL;   // This is the array of label strings. The label
+                             // entries points into the large labelFileData buffer.
+size_t numLabels    = 0;     // Number of entries in the labels array.
+char* labelFileData = NULL;  // Buffer holding the complete collection of label strings.
+
+// DECLARATIONS COPIED OUT OF MAIN 2
+unsigned int widthFrameHD;
+unsigned int heightFrameHD;
+
+size_t yuyvBufferSize;
+
+// ARGS
+char* chipString;
+char* modelFile;
+char* labelsFile;
+int inputWidth;
+int inputHeight;
+int desiredHDImgWidth;
+int desiredHDImgHeight;
+int threshold;
+int quality;
+
+// AXOVERLAY
+#ifdef ENABLE_OVERLAY
+// ------------------------------------------------------------------------------------------------------------------------
+// GLOBALS AXOVERLAY
+#define PALETTE_VALUE_RANGE 255.0
+
+typedef struct {
+    gint top;
+    gint bottom;
+    gint left;
+    gint right;
+    char class[50];
+    float score;
+    gint bounding_box_id;
+    gint text_id;
+    struct axoverlay_overlay_data bounding_box;
+    struct axoverlay_overlay_data text;
+} ObjectOverlay;
+
+#define OBJECT_OVERLAYS_MAX_LENGTH 5
+size_t object_overlays_length = 0;
+ObjectOverlay object_overlays[5];
+
+// static gint animation_timer = -1;
+// static gint overlay_id      = -1;
+// static gint overlay_id_text = -1;
+static gint counter = 10;
+// static gint top_color = 1;
+// static gint bottom_color    = 3;
+
+// HACKY ADDED GLOBALS
+// static gboolean has_object = FALSE;
+// static gint object_top    = 0;
+// static gint object_bottom = 0;
+// static gint object_left   = 0;
+// static gint object_right  = 0;
+
+// static gint object_top_2    = 0;
+// static gint object_bottom_2 = 0;
+// static gint object_left_2   = 0;
+// static gint object_right_2  = 0;
+
+// TODO: these end up being set in some callback function atm .super hacky
+static gint stream_width  = 1080;
+static gint stream_height = 720;
+
+static void get_coordinates(int* out_top,
+                            int* out_left,
+                            int* out_bottom,
+                            int* out_right,
+                            unsigned int frame_width,
+                            unsigned int frame_height,
+                            float top,
+                            float left,
+                            float bottom,
+                            float right) {
+    unsigned int croppedWidthHD = heightFrameHD;
+    unsigned int crop_x         = left * croppedWidthHD + (widthFrameHD - heightFrameHD) / 2;
+    unsigned int crop_y         = top * heightFrameHD;
+    unsigned int crop_w         = (right - left) * croppedWidthHD;
+    unsigned int crop_h         = (bottom - top) * heightFrameHD;
+
+    *out_top    = crop_y;
+    *out_left   = crop_x;
+    *out_bottom = crop_y + crop_h;
+    *out_right  = crop_x + crop_w;
+
+    // *out_top    = crop_y;           // round(locations[4 * 0] * desiredHDImgHeight);
+    // *out_left   = crop_x + crop_w;  // crop_round(locations[4 * 0 + 1] * desiredHDImgWidth);
+    // *out_bottom = crop_y + crop_h;  // round(locations[4 * 0 + 2] * desiredHDImgHeight);
+    // *out_right  = crop_x;           // round(locations[4 * 0 + 3] * desiredHDImgWidth);
+
+    // TESTING TO SCALE BY HEIGHT/WIDTH
+    // *out_top    = round(top * frame_height);
+    // *out_left   = round(left * frame_width);
+    // *out_bottom = round(bottom * frame_height);
+    // *out_right  = round(right * frame_width);
+
+    syslog(LOG_INFO,
+           "Width: %d Height %d Top: %f->%d Left: %f->%d Bottom: %f->%d Right: %f->%d",
+           frame_width,
+           frame_height,
+           top,
+           *out_top,
+           left,
+           *out_left,
+           bottom,
+           *out_bottom,
+           right,
+           *out_right);
+}
+
+/***** Drawing functions *****************************************************/
+
+/**
+ * brief Converts palette color index to cairo color value.
+ *
+ * This function converts the palette index, which has been initialized by
+ * function axoverlay_set_palette_color to a value that can be used by
+ * function cairo_set_source_rgba.
+ *
+ * param color_index Index in the palette setup.
+ *
+ * return color value.
+ */
+static gdouble index2cairo(const gint color_index) {
+    return ((color_index << 4) + color_index) / PALETTE_VALUE_RANGE;
+}
+
+/**
+ * brief Draw a rectangle using palette.
+ *
+ * This function draws a rectangle with lines from coordinates
+ * left, top, right and bottom with a palette color index and
+ * line width.
+ *
+ * param context Cairo rendering context.
+ * param left Left coordinate (x1).
+ * param top Top coordinate (y1).
+ * param right Right coordinate (x2).
+ * param bottom Bottom coordinate (y2).
+ * param color_index Palette color index.
+ * param line_width Rectange line width.
+ */
+static void draw_rectangle(cairo_t* context,
+                           gint left,
+                           gint top,
+                           gint right,
+                           gint bottom,
+                           gint color_index,
+                           gint line_width) {
+    gdouble val = 0;
+
+    val = index2cairo(color_index);
+    cairo_set_source_rgba(context, val, val, val, val);
+    cairo_set_operator(context, CAIRO_OPERATOR_SOURCE);
+    cairo_set_line_width(context, line_width);
+    cairo_rectangle(context, left, top, right - left, bottom - top);
+    cairo_stroke(context);
+}
+
+/**
+ * brief Draw a text using cairo.
+ *
+ * This function draws a text with a specified middle position,
+ * which will be adjusted depending on the text length.
+ *
+ * param context Cairo rendering context.
+ * param pos_x Center position coordinate (x).
+ * param pos_y Center position coordinate (y).
+ */
+static void draw_text(cairo_t* context, char* string, const gint pos_x, const gint pos_y) {
+    cairo_text_extents_t te;
+    cairo_text_extents_t te_length;
+
+    //  Show text in black
+    cairo_set_source_rgb(context, 0, 0, 0);
+    cairo_select_font_face(context, "serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(context, 15.0);
+
+    // Position the text at a fix centered position
+    cairo_text_extents(context, string, &te_length);
+    cairo_move_to(context, pos_x - te_length.width / 2, pos_y);
+
+    // Add the counter number to the shown text
+    cairo_text_extents(context, string, &te);
+    cairo_show_text(context, string);
+}
+
+/**
+ * brief Setup an overlay_data struct.
+ *
+ * This function initialize and setup an overlay_data
+ * struct with default values.
+ *
+ * param data The overlay data struct to initialize.
+ */
+static void setup_axoverlay_data(struct axoverlay_overlay_data* data) {
+    axoverlay_init_overlay_data(data);
+    data->postype         = AXOVERLAY_CUSTOM_NORMALIZED;
+    data->anchor_point    = AXOVERLAY_ANCHOR_CENTER;
+    data->x               = 0.0;
+    data->y               = 0.0;
+    data->scale_to_stream = FALSE;
+}
+
+/**
+ * brief Setup palette color table.
+ *
+ * This function initialize and setup an palette index
+ * representing ARGB values.
+ *
+ * param color_index Palette color index.
+ * param r R (red) value.
+ * param g G (green) value.
+ * param b B (blue) value.
+ * param a A (alpha) value.
+ *
+ * return result as boolean
+ */
+static gboolean
+setup_palette_color(const int index, const gint r, const gint g, const gint b, const gint a) {
+    GError* error = NULL;
+    struct axoverlay_palette_color color;
+
+    color.red      = r;
+    color.green    = g;
+    color.blue     = b;
+    color.alpha    = a;
+    color.pixelate = FALSE;
+    axoverlay_set_palette_color(index, &color, &error);
+    if (error != NULL) {
+        g_error_free(error);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/***** Callback functions ****************************************************/
+
+/**
+ * brief A callback function called when an overlay needs adjustments.
+ *
+ * This function is called to let developers make adjustments to
+ * the size and position of their overlays for each stream. This callback
+ * function is called prior to rendering every time when an overlay
+ * is rendered on a stream, which is useful if the resolution has been
+ * updated or rotation has changed.
+ *
+ * param id Overlay id.
+ * param stream Information about the rendered stream.
+ * param postype The position type.
+ * param overlay_x The x coordinate of the overlay.
+ * param overlay_y The y coordinate of the overlay.
+ * param overlay_width Overlay width.
+ * param overlay_height Overlay height.
+ * param user_data Optional user data associated with this overlay.
+ */
+static void adjustment_cb(gint id,
+                          struct axoverlay_stream_data* stream,
+                          enum axoverlay_position_type* postype,
+                          gfloat* overlay_x,
+                          gfloat* overlay_y,
+                          gint* overlay_width,
+                          gint* overlay_height,
+                          gpointer user_data) {
+    /* Silence compiler warnings for unused parameters/arguments */
+    (void)id;
+    (void)postype;
+    (void)overlay_x;
+    (void)overlay_y;
+    (void)user_data;
+
+    // syslog(LOG_INFO, "Adjust callback for overlay: %i x %i", *overlay_width, *overlay_height);
+    // syslog(LOG_INFO, "Adjust callback for stream: %i x %i", stream->width, stream->height);
+
+    *overlay_width  = stream->width;
+    *overlay_height = stream->height;
+}
+
+/**
+ * brief A callback function called when an overlay needs to be drawn.
+ *
+ * This function is called whenever the system redraws an overlay. This can
+ * happen in two cases, axoverlay_redraw() is called or a new stream is
+ * started.
+ *
+ * param rendering_context A pointer to the rendering context.
+ * param id Overlay id.
+ * param stream Information about the rendered stream.
+ * param postype The position type.
+ * param overlay_x The x coordinate of the overlay.
+ * param overlay_y The y coordinate of the overlay.
+ * param overlay_width Overlay width.
+ * param overlay_height Overlay height.
+ * param user_data Optional user data associated with this overlay.
+ */
+static void render_overlay_cb(gpointer rendering_context,
+                              gint id,
+                              struct axoverlay_stream_data* stream,
+                              enum axoverlay_position_type postype,
+                              gfloat overlay_x,
+                              gfloat overlay_y,
+                              gint overlay_width,
+                              gint overlay_height,
+                              gpointer user_data) {
+    /* Silence compiler warnings for unused parameters/arguments */
+    (void)postype;
+    (void)user_data;
+    (void)overlay_x;
+    (void)overlay_y;
+    (void)overlay_height;
+    (void)overlay_width;
+
+    // gdouble val = FALSE;
+
+    stream_width  = stream->width;   // TODO: SUPERHACKY TO SET THESE HERE
+    stream_height = stream->height;  // TODO: SUPERHACKY TO SET THESE HERE
+    syslog(LOG_INFO,
+           "Setting stream width/height to %dx%d (from %dx%d)",
+           stream_width,
+           stream_height,
+           stream->width,
+           stream->height);
+
+    // syslog(LOG_INFO, "Render callback for camera: %i", stream->camera);
+    // syslog(LOG_INFO, "Render callback for overlay: %i x %i", overlay_width, overlay_height);
+    // syslog(LOG_INFO, "Render callback for stream: %i x %i", stream->width, stream->height);
+
+    for (size_t i = 0; i < object_overlays_length; i++) {
+        ObjectOverlay* overlay = &object_overlays[i];
+
+        if (id == overlay->bounding_box_id) {
+            draw_rectangle(rendering_context,
+                           overlay->left,
+                           overlay->top,
+                           overlay->right,
+                           overlay->bottom,
+                           1,
+                           5);
+        } else if (id == overlay->text_id) {
+            draw_text(rendering_context,
+                      g_strdup_printf("%s (%f)", overlay->class, overlay->score),
+                      overlay->left + ((overlay->right - overlay->left) / 2),
+                      overlay->top + ((overlay->bottom - overlay->top) / 2));
+        }
+    }
+}
+
+/**
+ * brief Callback function which is called when animation timer has elapsed.
+ *
+ * This function is called when the animation timer has elapsed, which will
+ * update the counter, colors and also trigger a redraw of the overlay.
+ *
+ * param user_data Optional callback user data.
+ */
+static gboolean update_overlay_cb(gpointer user_data) {
+    /* Silence compiler warnings for unused parameters/arguments */
+    (void)user_data;
+
+    GError* error = NULL;
+
+    // Countdown
+    counter = counter < 1 ? 10 : counter - 1;
+
+    // if (counter == 0) {
+    //     // A small color surprise
+    //     top_color    = top_color > 2 ? 1 : top_color + 1;
+    //     bottom_color = bottom_color > 2 ? 1 : bottom_color + 1;
+    // }
+
+    // Request a redraw of the overlay
+    axoverlay_redraw(&error);
+    if (error != NULL) {
+        /*
+         * If redraw fails then it is likely due to that overlayd has
+         * crashed. Don't exit instead wait for overlayd to restart and
+         * for axoverlay to restore the connection.
+         */
+        syslog(LOG_ERR, "Failed to redraw overlay (%d): %s", error->code, error->message);
+        g_error_free(error);
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+#endif
+// ------------------------------------------------------------------------------------------------------------------------
+
 /**
  * @brief Free up resources held by an array of labels.
  *
@@ -344,86 +816,238 @@ end:
     return ret;
 }
 
+static gboolean detect_objects(void) {
+    struct timeval startTs, endTs;
+    unsigned int elapsedMs = 0;
+
+    syslog(LOG_INFO, "--------------------------------------------");
+
+    // Get latest frame from image pipeline.
+    VdoBuffer* buf = getLastFrameBlocking(sdImageProvider);
+    if (!buf) {
+        syslog(LOG_ERR, "buf empty in provider");
+        return FALSE;
+    }
+
+    VdoBuffer* buf_hq = getLastFrameBlocking(hdImageProvider);
+    if (!buf_hq) {
+        syslog(LOG_ERR, "buf empty in provider high resolution");
+        return FALSE;
+    }
+
+    // Get data from latest frame.
+    uint8_t* nv12Data    = (uint8_t*)vdo_buffer_get_data(buf);
+    uint8_t* nv12Data_hq = (uint8_t*)vdo_buffer_get_data(buf_hq);
+
+    // Covert image data from NV12 format to interleaved uint8_t RGB format.
+    gettimeofday(&startTs, NULL);
+
+    memcpy(ppInputAddr, nv12Data, yuyvBufferSize);
+    if (!larodRunJob(conn, ppReq, &error)) {
+        syslog(LOG_ERR, "Unable to run job to preprocess model: %s (%d)", error->msg, error->code);
+        return FALSE;
+    }
+    memcpy(ppInputAddrHD, nv12Data_hq, widthFrameHD * heightFrameHD * CHANNELS / 2);
+    if (!larodRunJob(conn, ppReqHD, &error)) {
+        syslog(LOG_ERR, "Unable to run job to preprocess model: %s (%d)", error->msg, error->code);
+        return FALSE;
+    }
+
+    gettimeofday(&endTs, NULL);
+
+    elapsedMs = (unsigned int)(((endTs.tv_sec - startTs.tv_sec) * 1000) +
+                               ((endTs.tv_usec - startTs.tv_usec) / 1000));
+    syslog(LOG_INFO, "Converted image in %u ms", elapsedMs);
+
+    // Since larodOutputAddr points to the beginning of the fd we should
+    // rewind the file position before each job.
+    if (lseek(larodOutput1Fd, 0, SEEK_SET) == -1) {
+        syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
+        return FALSE;
+    }
+
+    if (lseek(larodOutput2Fd, 0, SEEK_SET) == -1) {
+        syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
+        return FALSE;
+    }
+
+    if (lseek(larodOutput3Fd, 0, SEEK_SET) == -1) {
+        syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
+        return FALSE;
+    }
+
+    if (lseek(larodOutput4Fd, 0, SEEK_SET) == -1) {
+        syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
+        return FALSE;
+    }
+
+    gettimeofday(&startTs, NULL);
+    if (!larodRunJob(conn, infReq, &error)) {
+        syslog(LOG_ERR,
+               "Unable to run inference on model %s: %s (%d)",
+               labelsFile,
+               error->msg,
+               error->code);
+        return FALSE;
+    }
+    gettimeofday(&endTs, NULL);
+
+    elapsedMs = (unsigned int)(((endTs.tv_sec - startTs.tv_sec) * 1000) +
+                               ((endTs.tv_usec - startTs.tv_usec) / 1000));
+    syslog(LOG_INFO, "Ran inference for %u ms", elapsedMs);
+
+    float* locations          = (float*)larodOutput1Addr;
+    float* classes            = (float*)larodOutput2Addr;
+    float* scores             = (float*)larodOutput3Addr;
+    float* numberOfDetections = (float*)larodOutput4Addr;
+
+    if ((int)numberOfDetections[0] == 0) {
+        syslog(LOG_INFO, "No object is detected");
+        return TRUE;
+    }
+
+    for (int i = 0; i < numberOfDetections[0]; i++) {
+        float top    = locations[4 * i];
+        float left   = locations[4 * i + 1];
+        float bottom = locations[4 * i + 2];
+        float right  = locations[4 * i + 3];
+
+        unsigned int croppedWidthHD = heightFrameHD;
+
+        unsigned int crop_x = left * croppedWidthHD + (widthFrameHD - heightFrameHD) / 2;
+        unsigned int crop_y = top * heightFrameHD;
+        unsigned int crop_w = (right - left) * croppedWidthHD;
+        unsigned int crop_h = (bottom - top) * heightFrameHD;
+
+        if (scores[i] >= threshold / 100.0) {
+            syslog(LOG_INFO,
+                   "Object %d: Classes: %s - Scores: %f - Locations: [%f,%f,%f,%f]",
+                   i,
+                   labels[(int)classes[i]],
+                   scores[i],
+                   top,
+                   left,
+                   bottom,
+                   right);
+
+            unsigned char* crop_buffer = crop_interleaved(ppOutputAddrHD,
+                                                          widthFrameHD,
+                                                          heightFrameHD,
+                                                          CHANNELS,
+                                                          crop_x,
+                                                          crop_y,
+                                                          crop_w,
+                                                          crop_h);
+
+            unsigned long jpeg_size    = 0;
+            unsigned char* jpeg_buffer = NULL;
+            struct jpeg_compress_struct jpeg_conf;
+            set_jpeg_configuration(crop_w, crop_h, CHANNELS, quality, &jpeg_conf);
+            buffer_to_jpeg(crop_buffer, &jpeg_conf, &jpeg_size, &jpeg_buffer);
+            char file_name[32];
+            snprintf(file_name, sizeof(char) * 32, "/tmp/detection_%i.jpg", i);
+            jpeg_to_file(file_name, jpeg_buffer, jpeg_size);
+            free(crop_buffer);
+            free(jpeg_buffer);
+        }
+    }
+
+// ADDED: UPDATE DRAW BOX LOCATION FOR FIRST OBJECT ---------3
+#ifdef ENABLE_OVERLAY
+    syslog(LOG_INFO,
+           "Desired HDImageHeight/Width %dx%d, height/WidthFrameHd: %dx%d",
+           desiredHDImgHeight,
+           desiredHDImgWidth,
+           heightFrameHD,
+           widthFrameHD);
+
+    object_overlays_length = numberOfDetections[0] < OBJECT_OVERLAYS_MAX_LENGTH
+                                 ? numberOfDetections[0]
+                                 : OBJECT_OVERLAYS_MAX_LENGTH;
+
+    for (size_t i = 0; i < object_overlays_length; i++) {
+        ObjectOverlay* overlay = &object_overlays[i];
+
+        float top    = locations[4 * i];
+        float left   = locations[4 * i + 1];
+        float bottom = locations[4 * i + 2];
+        float right  = locations[4 * i + 3];
+
+        get_coordinates(&overlay->top,
+                        &overlay->left,
+                        &overlay->bottom,
+                        &overlay->right,
+                        stream_width,
+                        stream_height,
+                        top,
+                        left,
+                        bottom,
+                        right);
+
+        strcpy(overlay->class, labels[(int)classes[i]]);
+        overlay->score = scores[i];
+    }
+
+    // float top_1    = locations[4 * 0];
+    // float left_1   = locations[4 * 0 + 1];
+    // float bottom_1 = locations[4 * 0 + 2];
+    // float right_1  = locations[4 * 0 + 3];
+
+    // get_coordinates(&object_top,
+    //                 &object_left,
+    //                 &object_bottom,
+    //                 &object_right,
+    //                 stream_width,
+    //                 stream_height,
+    //                 top_1,
+    //                 left_1,
+    //                 bottom_1,
+    //                 right_1);
+
+    // float top_2    = locations[4 * 1];
+    // float left_2   = locations[4 * 1 + 1];
+    // float bottom_2 = locations[4 * 1 + 2];
+    // float right_2  = locations[4 * 1 + 3];
+
+    // get_coordinates(&object_top_2,
+    //                 &object_left_2,
+    //                 &object_bottom_2,
+    //                 &object_right_2,
+    //                 stream_width,
+    //                 stream_height,
+    //                 top_2,
+    //                 left_2,
+    //                 bottom_2,
+    //                 right_2);
+
+    // syslog(LOG_INFO,
+    //        "top1/2: %d %d, left1/2: %d %d, bot1/2: %d %d, right1/2: %d %d",
+    //        object_top,
+    //        object_top_2,
+    //        object_left,
+    //        object_left_2,
+    //        object_bottom,
+    //        object_bottom_2,
+    //        object_right,
+    //        object_right_2);
+#endif
+
+    // Release frame reference to provider.
+    returnFrame(sdImageProvider, buf);
+    returnFrame(hdImageProvider, buf_hq);
+
+    return TRUE;
+}
+
+static gboolean detect_objects_timeout_callback(gpointer user_data) {
+    (void)user_data;
+    return detect_objects();
+}
+
 /**
  * @brief Main function that starts a stream with different options.
  */
 int main(int argc, char** argv) {
-    // Hardcode to use three image "color" channels (eg. RGB).
-    const unsigned int CHANNELS = 3;
-    // Hardcode to set output bytes of four tensors from MobileNet V2 model.
-    const unsigned int FLOATSIZE   = 4;
-    const unsigned int TENSOR1SIZE = 80 * FLOATSIZE;
-    const unsigned int TENSOR2SIZE = 20 * FLOATSIZE;
-    const unsigned int TENSOR3SIZE = 20 * FLOATSIZE;
-    const unsigned int TENSOR4SIZE = 1 * FLOATSIZE;
-
-    // Name patterns for the temp file we will create.
-
-    // Pre-processing of the High resolution frame input and output
-    char PP_HD_INPUT_FILE_PATTERN[]  = "/tmp/larod.pp.hd.test-XXXXXX";
-    char PP_HD_OUTPUT_FILE_PATTERN[] = "/tmp/larod.pp.hd.out.test-XXXXXX";
-
-    // Pre-processing of the Low resolution frame input and output
-    // The output of the pre-processing correspond with the input of the object detector
-    char PP_SD_INPUT_FILE_PATTERN[]           = "/tmp/larod.pp.test-XXXXXX";
-    char OBJECT_DETECTOR_INPUT_FILE_PATTERN[] = "/tmp/larod.in.test-XXXXXX";
-
-    char OBJECT_DETECTOR_OUT1_FILE_PATTERN[] = "/tmp/larod.out1.test-XXXXXX";
-    char OBJECT_DETECTOR_OUT2_FILE_PATTERN[] = "/tmp/larod.out2.test-XXXXXX";
-    char OBJECT_DETECTOR_OUT3_FILE_PATTERN[] = "/tmp/larod.out3.test-XXXXXX";
-    char OBJECT_DETECTOR_OUT4_FILE_PATTERN[] = "/tmp/larod.out4.test-XXXXXX";
-
-    bool ret                        = false;
-    ImgProvider_t* sdImageProvider  = NULL;
-    ImgProvider_t* hdImageProvider  = NULL;
-    larodError* error               = NULL;
-    larodConnection* conn           = NULL;
-    larodMap* ppMap                 = NULL;
-    larodMap* cropMap               = NULL;
-    larodMap* ppMapHD               = NULL;
-    larodModel* ppModel             = NULL;
-    larodModel* ppModelHD           = NULL;
-    larodModel* model               = NULL;
-    larodTensor** ppInputTensors    = NULL;
-    size_t ppNumInputs              = 0;
-    larodTensor** ppOutputTensors   = NULL;
-    size_t ppNumOutputs             = 0;
-    larodTensor** ppInputTensorsHD  = NULL;
-    size_t ppNumInputsHD            = 0;
-    larodTensor** ppOutputTensorsHD = NULL;
-    size_t ppNumOutputsHD           = 0;
-    larodTensor** inputTensors      = NULL;
-    size_t numInputs                = 0;
-    larodTensor** outputTensors     = NULL;
-    size_t numOutputs               = 0;
-    larodJobRequest* ppReq          = NULL;
-    larodJobRequest* ppReqHD        = NULL;
-    larodJobRequest* infReq         = NULL;
-    void* cropAddr                  = NULL;
-    void* ppInputAddr               = MAP_FAILED;
-    void* ppInputAddrHD             = MAP_FAILED;
-    void* ppOutputAddrHD            = MAP_FAILED;
-    void* larodInputAddr = MAP_FAILED;  // this address is both used for the output of the
-                                        // preprocessing and input for the inference
-    void* larodOutput1Addr = MAP_FAILED;
-    void* larodOutput2Addr = MAP_FAILED;
-    void* larodOutput3Addr = MAP_FAILED;
-    void* larodOutput4Addr = MAP_FAILED;
-    int larodModelFd       = -1;
-    int ppInputFd          = -1;
-    int ppInputFdHD        = -1;
-    int ppOutputFdHD       = -1;
-    int larodInputFd       = -1;  // This file descriptor is used for both as output for the pre
-                                  // processing and input for the inference
-    int larodOutput1Fd = -1;
-    int larodOutput2Fd = -1;
-    int larodOutput3Fd = -1;
-    int larodOutput4Fd = -1;
-    char** labels      = NULL;   // This is the array of label strings. The label
-                                 // entries points into the large labelFileData buffer.
-    size_t numLabels    = 0;     // Number of entries in the labels array.
-    char* labelFileData = NULL;  // Buffer holding the complete collection of label strings.
-
     // Open the syslog to report messages for "object_detection"
     openlog("object_detection", LOG_PID | LOG_CONS, LOG_USER);
 
@@ -433,15 +1057,22 @@ int main(int argc, char** argv) {
         goto earlyend;
     }
 
-    const char* chipString       = args.chip;
-    const char* modelFile        = args.modelFile;
-    const char* labelsFile       = args.labelsFile;
-    const int inputWidth         = args.width;
-    const int inputHeight        = args.height;
-    const int desiredHDImgWidth  = args.raw_width;
-    const int desiredHDImgHeight = args.raw_height;
-    const int threshold          = args.threshold;
-    const int quality            = args.quality;
+    chipString         = args.chip;
+    modelFile          = args.modelFile;
+    labelsFile         = args.labelsFile;
+    inputWidth         = args.width;
+    inputHeight        = args.height;
+    desiredHDImgWidth  = 1080;  // args.raw_width;
+    desiredHDImgHeight = 720;   // args.raw_height;
+    threshold          = 0;     // TODO: Removed: args.threshold;
+    quality            = args.quality;
+
+    syslog(LOG_INFO,
+           "Input width/height: %dx%d Desired img width/height %dx%d",
+           inputWidth,
+           inputHeight,
+           desiredHDImgWidth,
+           desiredHDImgHeight);
 
     syslog(LOG_INFO, "Finding best resolution to use as model input");
     unsigned int streamWidth  = 0;
@@ -461,8 +1092,7 @@ int main(int argc, char** argv) {
         goto end;
     }
     syslog(LOG_INFO, "Find the best resolution to save the high resolution image");
-    unsigned int widthFrameHD;
-    unsigned int heightFrameHD;
+
     if (!chooseStreamResolution(desiredHDImgWidth,
                                 desiredHDImgHeight,
                                 &widthFrameHD,
@@ -643,7 +1273,7 @@ int main(int argc, char** argv) {
         syslog(LOG_ERR, "Could not get pitches of tensor: %s", error->msg);
         goto end;
     }
-    size_t yuyvBufferSize                     = ppInputPitches->pitches[0];
+    yuyvBufferSize                            = ppInputPitches->pitches[0];
     const larodTensorPitches* ppOutputPitches = larodGetTensorPitches(ppOutputTensors[0], &error);
     if (!ppOutputPitches) {
         syslog(LOG_ERR, "Could not get pitches of tensor: %s", error->msg);
@@ -819,150 +1449,130 @@ int main(int argc, char** argv) {
         goto end;
     }
 
-    while (true) {
-        struct timeval startTs, endTs;
-        unsigned int elapsedMs = 0;
+// BEGIN INIT AXOVERLAY ------------------------------
+#ifdef ENABLE_OVERLAY
+    GError* overlay_error = NULL;
+    GError* error_text    = NULL;
 
-        // Get latest frame from image pipeline.
-        VdoBuffer* buf = getLastFrameBlocking(sdImageProvider);
-        if (!buf) {
-            syslog(LOG_ERR, "buf empty in provider");
-            goto end;
-        }
-
-        VdoBuffer* buf_hq = getLastFrameBlocking(hdImageProvider);
-        if (!buf_hq) {
-            syslog(LOG_ERR, "buf empty in provider high resolution");
-            goto end;
-        }
-
-        // Get data from latest frame.
-        uint8_t* nv12Data    = (uint8_t*)vdo_buffer_get_data(buf);
-        uint8_t* nv12Data_hq = (uint8_t*)vdo_buffer_get_data(buf_hq);
-
-        // Covert image data from NV12 format to interleaved uint8_t RGB format.
-        gettimeofday(&startTs, NULL);
-
-        memcpy(ppInputAddr, nv12Data, yuyvBufferSize);
-        if (!larodRunJob(conn, ppReq, &error)) {
-            syslog(LOG_ERR,
-                   "Unable to run job to preprocess model: %s (%d)",
-                   error->msg,
-                   error->code);
-            goto end;
-        }
-        memcpy(ppInputAddrHD, nv12Data_hq, widthFrameHD * heightFrameHD * CHANNELS / 2);
-        if (!larodRunJob(conn, ppReqHD, &error)) {
-            syslog(LOG_ERR,
-                   "Unable to run job to preprocess model: %s (%d)",
-                   error->msg,
-                   error->code);
-            goto end;
-        }
-
-        gettimeofday(&endTs, NULL);
-
-        elapsedMs = (unsigned int)(((endTs.tv_sec - startTs.tv_sec) * 1000) +
-                                   ((endTs.tv_usec - startTs.tv_usec) / 1000));
-        syslog(LOG_INFO, "Converted image in %u ms", elapsedMs);
-
-        // Since larodOutputAddr points to the beginning of the fd we should
-        // rewind the file position before each job.
-        if (lseek(larodOutput1Fd, 0, SEEK_SET) == -1) {
-            syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
-            goto end;
-        }
-
-        if (lseek(larodOutput2Fd, 0, SEEK_SET) == -1) {
-            syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
-            goto end;
-        }
-
-        if (lseek(larodOutput3Fd, 0, SEEK_SET) == -1) {
-            syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
-            goto end;
-        }
-
-        if (lseek(larodOutput4Fd, 0, SEEK_SET) == -1) {
-            syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
-            goto end;
-        }
-
-        gettimeofday(&startTs, NULL);
-        if (!larodRunJob(conn, infReq, &error)) {
-            syslog(LOG_ERR,
-                   "Unable to run inference on model %s: %s (%d)",
-                   labelsFile,
-                   error->msg,
-                   error->code);
-            goto end;
-        }
-        gettimeofday(&endTs, NULL);
-
-        elapsedMs = (unsigned int)(((endTs.tv_sec - startTs.tv_sec) * 1000) +
-                                   ((endTs.tv_usec - startTs.tv_usec) / 1000));
-        syslog(LOG_INFO, "Ran inference for %u ms", elapsedMs);
-
-        float* locations          = (float*)larodOutput1Addr;
-        float* classes            = (float*)larodOutput2Addr;
-        float* scores             = (float*)larodOutput3Addr;
-        float* numberOfDetections = (float*)larodOutput4Addr;
-
-        if ((int)numberOfDetections[0] == 0) {
-            syslog(LOG_INFO, "No object is detected");
-            continue;
-        }
-
-        for (int i = 0; i < numberOfDetections[0]; i++) {
-            float top    = locations[4 * i];
-            float left   = locations[4 * i + 1];
-            float bottom = locations[4 * i + 2];
-            float right  = locations[4 * i + 3];
-
-            unsigned int croppedWidthHD = heightFrameHD;
-
-            unsigned int crop_x = left * croppedWidthHD + (widthFrameHD - heightFrameHD) / 2;
-            unsigned int crop_y = top * heightFrameHD;
-            unsigned int crop_w = (right - left) * croppedWidthHD;
-            unsigned int crop_h = (bottom - top) * heightFrameHD;
-
-            if (scores[i] >= threshold / 100.0) {
-                syslog(LOG_INFO,
-                       "Object %d: Classes: %s - Scores: %f - Locations: [%f,%f,%f,%f]",
-                       i,
-                       labels[(int)classes[i]],
-                       scores[i],
-                       top,
-                       left,
-                       bottom,
-                       right);
-
-                unsigned char* crop_buffer = crop_interleaved(ppOutputAddrHD,
-                                                              widthFrameHD,
-                                                              heightFrameHD,
-                                                              CHANNELS,
-                                                              crop_x,
-                                                              crop_y,
-                                                              crop_w,
-                                                              crop_h);
-
-                unsigned long jpeg_size    = 0;
-                unsigned char* jpeg_buffer = NULL;
-                struct jpeg_compress_struct jpeg_conf;
-                set_jpeg_configuration(crop_w, crop_h, CHANNELS, quality, &jpeg_conf);
-                buffer_to_jpeg(crop_buffer, &jpeg_conf, &jpeg_size, &jpeg_buffer);
-                char file_name[32];
-                snprintf(file_name, sizeof(char) * 32, "/tmp/detection_%i.jpg", i);
-                jpeg_to_file(file_name, jpeg_buffer, jpeg_size);
-                free(crop_buffer);
-                free(jpeg_buffer);
-            }
-        }
-
-        // Release frame reference to provider.
-        returnFrame(sdImageProvider, buf);
-        returnFrame(hdImageProvider, buf_hq);
+    //  Initialize the library
+    struct axoverlay_settings settings;
+    axoverlay_init_axoverlay_settings(&settings);
+    settings.render_callback     = render_overlay_cb;
+    settings.adjustment_callback = adjustment_cb;
+    settings.select_callback     = NULL;
+    settings.backend             = AXOVERLAY_CAIRO_IMAGE_BACKEND;
+    axoverlay_init(&settings, &overlay_error);
+    if (overlay_error != NULL) {
+        syslog(LOG_ERR, "Failed to initialize axoverlay: %s", overlay_error->message);
+        g_error_free(overlay_error);
+        return 1;
     }
+
+    //  Setup colors
+    if (!setup_palette_color(0, 0, 0, 0, 0) || !setup_palette_color(1, 255, 0, 0, 255) ||
+        !setup_palette_color(2, 0, 255, 0, 255) || !setup_palette_color(3, 0, 0, 255, 255)) {
+        syslog(LOG_ERR, "Failed to setup palette colors");
+        return 1;
+    }
+
+    // Get max resolution for width and height
+    gint camera_width = axoverlay_get_max_resolution_width(1, &overlay_error);
+    if (overlay_error != NULL) {
+        syslog(LOG_ERR, "Failed to get max resolution width: %s", overlay_error->message);
+        g_error_free(overlay_error);
+        overlay_error = NULL;
+    }
+
+    gint camera_height = axoverlay_get_max_resolution_height(1, &overlay_error);
+    if (overlay_error != NULL) {
+        syslog(LOG_ERR, "Failed to get max resolution height: %s", overlay_error->message);
+        g_error_free(overlay_error);
+        overlay_error = NULL;
+    }
+
+    syslog(LOG_INFO, "Max resolution (width x height): %i x %i", camera_width, camera_height);
+
+    // Create a large overlay using Palette color space
+    // struct axoverlay_overlay_data data;
+    // setup_axoverlay_data(&data);
+    // data.width      = camera_width;
+    // data.height     = camera_height;
+    // data.colorspace = AXOVERLAY_COLORSPACE_4BIT_PALETTE;
+    // overlay_id      = axoverlay_create_overlay(&data, NULL, &overlay_error);
+    // if (overlay_error != NULL) {
+    //     syslog(LOG_ERR, "Failed to create first overlay: %s", overlay_error->message);
+    //     g_error_free(overlay_error);
+    //     return 1;
+    // }
+
+    for (int i = 0; i < OBJECT_OVERLAYS_MAX_LENGTH; i++) {
+        ObjectOverlay* object = &object_overlays[i];
+
+        // Bounding box
+        struct axoverlay_overlay_data* bounding_box = &object->bounding_box;
+        setup_axoverlay_data(bounding_box);
+        bounding_box->width      = camera_width;
+        bounding_box->height     = camera_height;
+        bounding_box->colorspace = AXOVERLAY_COLORSPACE_4BIT_PALETTE;
+        object->bounding_box_id  = axoverlay_create_overlay(bounding_box, NULL, &overlay_error);
+        if (overlay_error != NULL) {
+            syslog(LOG_ERR, "Failed to create first overlay: %s", overlay_error->message);
+            g_error_free(overlay_error);
+            return 1;
+        }
+
+        // Text
+        struct axoverlay_overlay_data* text = &object->text;
+        setup_axoverlay_data(text);
+        text->width      = camera_width;
+        text->height     = camera_height;
+        text->colorspace = AXOVERLAY_COLORSPACE_ARGB32;
+        object->text_id  = axoverlay_create_overlay(text, NULL, &error_text);
+        if (error_text != NULL) {
+            syslog(LOG_ERR, "Failed to create second overlay: %s", error_text->message);
+            g_error_free(error_text);
+            return 1;
+        }
+    }
+
+    // Create an text overlay using ARGB32 color space
+    // struct axoverlay_overlay_data data_text;
+    // setup_axoverlay_data(&data_text);
+    // data_text.width      = camera_width;
+    // data_text.height     = camera_height;
+    // data_text.colorspace = AXOVERLAY_COLORSPACE_ARGB32;
+    // overlay_id_text      = axoverlay_create_overlay(&data_text, NULL, &error_text);
+    // if (error_text != NULL) {
+    //     syslog(LOG_ERR, "Failed to create second overlay: %s", error_text->message);
+    //     g_error_free(error_text);
+    //     return 1;
+    // }
+
+    // Draw overlays
+    axoverlay_redraw(&overlay_error);
+    if (overlay_error != NULL) {
+        syslog(LOG_ERR, "Failed to draw overlays: %s", overlay_error->message);
+        // axoverlay_destroy_overlay(overlay_id, &overlay_error);
+        // axoverlay_destroy_overlay(overlay_id_text, &error_text);
+        axoverlay_cleanup();
+        g_error_free(overlay_error);
+        g_error_free(error_text);
+        return 1;
+    }
+
+    // Start animation timer
+    g_timeout_add_seconds(5, update_overlay_cb, NULL);
+#endif
+
+    // END INIT AXOVERLAY ------------------------------
+
+    g_timeout_add_seconds(5, detect_objects_timeout_callback, NULL);
+
+    // Enter main loop
+    GMainLoop* main_loop = g_main_loop_new(NULL, FALSE);
+    g_main_loop_run(main_loop);
+
+    // TODO: LOOP USED TO BE HERE
 
     syslog(LOG_INFO, "Stop streaming video from VDO");
     if (!stopFrameFetch(sdImageProvider)) {

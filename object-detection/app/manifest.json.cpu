@@ -11,5 +11,13 @@
             "runMode": "never",
             "version": "1.0.0"
         }
+    },
+    "resources": {
+        "dbus": {
+            "requiredMethods": [
+                "com.axis.Graphics2.*",
+                "com.axis.Overlay2.*"
+            ]
+        }
     }
 }

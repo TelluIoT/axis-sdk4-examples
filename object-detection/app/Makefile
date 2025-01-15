@@ -4,10 +4,18 @@ PROGS	= $(PROG1)
 LIBDIR = lib
 LIBJPEG_TURBO = /opt/build/libjpeg-turbo/build
 
-PKGS = gio-2.0 gio-unix-2.0 liblarod vdostream
+ENABLE_OVERLAY = ""
+
+PKGS = glib-2.0 gio-2.0 gio-unix-2.0 liblarod vdostream cairo # cairo added for overlay
 
 CFLAGS += -I$(LIBJPEG_TURBO)/include -DLAROD_API_VERSION_3
 LDLIBS  += -ljpeg
+
+ifdef ENABLE_OVERLAY 
+LDLIBS += -s -laxoverlay # added for overlay
+CFLAGS += -D ENABLE_OVERLAY
+endif
+
 LDFLAGS += -L./$(LIBDIR) -Wl,-rpath,'$$ORIGIN/$(LIBDIR)'
 
 CFLAGS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) pkg-config --cflags $(PKGS))
@@ -34,4 +42,4 @@ $(PROG1): $(OBJS1)
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 clean:
-	rm -rf $(PROGS) *.o $(LIBDIR) *.eap* *_LICENSE.txt manifest.json package.conf* param.conf
+	rm -rf $(PROGS) *.o $(LIBDIR) *.eap* *_LICENSE.txt manifest.json package.conf* param.conf ./build
