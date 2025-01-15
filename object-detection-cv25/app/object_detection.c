@@ -489,7 +489,7 @@ int main(int argc, char** argv) {
     const int inputHeight        = args.height;
     const int desiredHDImgWidth  = args.raw_width;
     const int desiredHDImgHeight = args.raw_height;
-    const int threshold          = args.threshold;
+    const int threshold          = 0;  // args.threshold;
     const int quality            = args.quality;
     const int numberOfDetections = args.numDetections;  // number of detections
     const int numberOfClasses    = args.numLabels;      // number of classes
@@ -876,6 +876,9 @@ int main(int argc, char** argv) {
     while (true) {
         struct timeval startTs, endTs;
         unsigned int elapsedMs = 0;
+
+        g_usleep(10 * 1000000);
+        syslog(LOG_INFO, "--------------------------");
 
         // Get latest frame from image pipeline.
         VdoBuffer* buf = getLastFrameBlocking(sdImageProvider);
