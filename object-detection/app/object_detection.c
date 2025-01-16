@@ -174,6 +174,8 @@ bbox_t* bounding_box = NULL;
 
 // AXOVERLAY
 #if defined(ENABLE_OVERLAY) || defined(ENABLE_CV25_OVERLAY)
+#define OVERLAY_SCORE_THRESHOLD 0.2
+
 // ------------------------------------------------------------------------------------------------------------------------
 // GLOBALS AXOVERLAY
 #define PALETTE_VALUE_RANGE 255.0
@@ -1093,10 +1095,9 @@ static void draw_cv25_overlay(void) {
     bbox_color_t BOUNDING_BOX_COLOR_RED   = bbox_color_from_rgb(0xff, 0x0, 0x0);
     bbox_color_t BOUNDING_BOX_COLOR_GREEN = bbox_color_from_rgb(0x0, 0xff, 0x0);
     bbox_color_t BOUNDING_BOX_COLOR_BLUE  = bbox_color_from_rgb(0x0, 0x0, 0xff);
+    bbox_color_t BOUNDING_BOX_COLOR_BLACK = bbox_color_from_rgb(0xff, 0xff, 0xff);
 
-    // Switch to thick corner style
-    bbox_thickness_thick(bounding_box);
-    bbox_style_corners(bounding_box);
+    bbox_thickness_medium(bounding_box);
 
     syslog(LOG_INFO, "looping over objects");
 
@@ -1109,16 +1110,25 @@ static void draw_cv25_overlay(void) {
         float box_right  = overlay->right / (float)stream_width;
         float box_bottom = overlay->bottom / (float)stream_height;
 
+        // Set outline based on score
+        if (overlay->score >= OVERLAY_SCORE_THRESHOLD) {
+            bbox_style_outline(bounding_box);
+        } else {
+            // Switch to thick corner style
+            bbox_style_corners(bounding_box);
+        }
+
         // Get color based on label
         bbox_color_t color;
         if (strcmp(overlay->class, "bed") == 0) {
             color = BOUNDING_BOX_COLOR_GREEN;
         } else if (strcmp(overlay->class, "chair") == 0) {
             color = BOUNDING_BOX_COLOR_BLUE;
-        } else {
+        } else if (strcmp(overlay->class, "person") == 0) {
             color = BOUNDING_BOX_COLOR_RED;
+        } else {
+            color = BOUNDING_BOX_COLOR_BLACK;
         }
-
         bbox_color(bounding_box, color);
 
         // syslog(LOG_INFO,
