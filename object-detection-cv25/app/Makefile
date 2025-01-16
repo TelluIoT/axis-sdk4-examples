@@ -4,7 +4,7 @@ PROGS	= $(PROG1)
 LIBDIR = lib
 LIBJPEG_TURBO = /opt/build/libjpeg-turbo/build
 
-PKGS = gio-2.0 gio-unix-2.0 liblarod vdostream
+PKGS = gio-2.0 gio-unix-2.0 liblarod vdostream bbox
 
 CFLAGS += -I$(LIBJPEG_TURBO)/include -DLAROD_API_VERSION_3
 LDLIBS  += -ljpeg -lm
