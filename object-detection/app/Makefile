@@ -4,7 +4,8 @@ PROGS	= $(PROG1)
 LIBDIR = lib
 LIBJPEG_TURBO = /opt/build/libjpeg-turbo/build
 
-ENABLE_OVERLAY = ""
+# ENABLE_OVERLAY = ""
+ENABLE_CV25_OVERLAY = ""
 
 PKGS = glib-2.0 gio-2.0 gio-unix-2.0 liblarod vdostream cairo # cairo added for overlay
 
@@ -14,6 +15,11 @@ LDLIBS  += -ljpeg
 ifdef ENABLE_OVERLAY 
 LDLIBS += -s -laxoverlay # added for overlay
 CFLAGS += -D ENABLE_OVERLAY
+endif
+
+ifdef ENABLE_CV25_OVERLAY
+PKGS += bbox
+CFLAGS += -D ENABLE_CV25_OVERLAY
 endif
 
 LDFLAGS += -L./$(LIBDIR) -Wl,-rpath,'$$ORIGIN/$(LIBDIR)'

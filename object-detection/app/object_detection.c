@@ -68,6 +68,11 @@
 #include <math.h>
 #endif
 
+#ifdef ENABLE_CV25_OVERLAY
+#include <bbox.h>
+#include <math.h>
+#endif
+
 // GLOBALS OBJDETECTION
 // TODO: COPIED OUT OF MAIN
 // Hardcode to use three image "color" channels (eg. RGB).
@@ -163,8 +168,12 @@ int desiredHDImgHeight;
 int threshold;
 int quality;
 
+#ifdef ENABLE_CV25_OVERLAY
+bbox_t* bounding_box = NULL;
+#endif
+
 // AXOVERLAY
-#ifdef ENABLE_OVERLAY
+#if defined(ENABLE_OVERLAY) || defined(ENABLE_CV25_OVERLAY)
 // ------------------------------------------------------------------------------------------------------------------------
 // GLOBALS AXOVERLAY
 #define PALETTE_VALUE_RANGE 255.0
@@ -178,8 +187,10 @@ typedef struct {
     float score;
     gint bounding_box_id;
     gint text_id;
+#ifdef ENABLE_OVERLAY
     struct axoverlay_overlay_data bounding_box;
     struct axoverlay_overlay_data text;
+#endif
 } ObjectOverlay;
 
 #define OBJECT_OVERLAYS_MAX_LENGTH 5
@@ -189,7 +200,7 @@ ObjectOverlay object_overlays[5];
 // static gint animation_timer = -1;
 // static gint overlay_id      = -1;
 // static gint overlay_id_text = -1;
-static gint counter = 10;
+// static gint counter = 10;
 // static gint top_color = 1;
 // static gint bottom_color    = 3;
 
@@ -206,7 +217,7 @@ static gint counter = 10;
 // static gint object_right_2  = 0;
 
 // TODO: these end up being set in some callback function atm .super hacky
-static gint stream_width  = 1080;
+static gint stream_width  = 1280;
 static gint stream_height = 720;
 
 static void get_coordinates(int* out_top,
@@ -254,7 +265,9 @@ static void get_coordinates(int* out_top,
            right,
            *out_right);
 }
+#endif
 
+#ifdef ENABLE_OVERLAY
 /***** Drawing functions *****************************************************/
 
 /**
@@ -953,7 +966,7 @@ static gboolean detect_objects(void) {
     }
 
 // ADDED: UPDATE DRAW BOX LOCATION FOR FIRST OBJECT ---------3
-#ifdef ENABLE_OVERLAY
+#if defined(ENABLE_OVERLAY) || defined(ENABLE_CV25_OVERLAY)
     syslog(LOG_INFO,
            "Desired HDImageHeight/Width %dx%d, height/WidthFrameHd: %dx%d",
            desiredHDImgHeight,
@@ -1044,6 +1057,118 @@ static gboolean detect_objects_timeout_callback(gpointer user_data) {
     return detect_objects();
 }
 
+// BEGIN BBOX
+#ifdef ENABLE_CV25_OVERLAY
+
+static void draw_cv25_overlay(void) {
+    syslog(LOG_INFO, "about to draw cv25 overlay");
+    // Remove stuff from last frame (TODO: probably way better ways of doing this)
+    if (bounding_box) {
+        bbox_destroy(bounding_box);
+    }
+
+    syslog(LOG_INFO, "making bbox");
+
+    // bounding_box = bbox_new(2u, 1u, 2u);
+    bounding_box = bbox_view_new(1u);
+    if (!bounding_box) {
+        syslog(LOG_INFO, "Failed creating bbox: %s", strerror(errno));
+    }
+
+    syslog(LOG_INFO, "setting output");
+
+    // If camera lacks video output, this call will succeed but not do anything.
+    if (!bbox_video_output(bounding_box, true)) {
+        syslog(LOG_INFO, "Failed enabling video-output for bbox: %s", strerror(errno));
+    }
+
+    // TODO: Not sure how much of this needs to be done on every draw call
+    // Draw on channel 1 and 2 (TODO: not sure what this means)
+
+    // bbox_coordinates_frame_normalized(bounding_box);  // TODO: not sure if this should be
+    // used
+
+    syslog(LOG_INFO, "Setting colors");
+
+    bbox_color_t BOUNDING_BOX_COLOR_RED   = bbox_color_from_rgb(0xff, 0x0, 0x0);
+    bbox_color_t BOUNDING_BOX_COLOR_GREEN = bbox_color_from_rgb(0x0, 0xff, 0x0);
+    bbox_color_t BOUNDING_BOX_COLOR_BLUE  = bbox_color_from_rgb(0x0, 0x0, 0xff);
+
+    // Switch to thick corner style
+    bbox_thickness_thick(bounding_box);
+    bbox_style_corners(bounding_box);
+
+    syslog(LOG_INFO, "looping over objects");
+
+    for (size_t i = 0; i < object_overlays_length; i++) {
+        ObjectOverlay* overlay = &object_overlays[i];
+
+        // Normalize screen coords
+        float box_left   = overlay->left / (float)stream_width;
+        float box_top    = overlay->top / (float)stream_height;
+        float box_right  = overlay->right / (float)stream_width;
+        float box_bottom = overlay->bottom / (float)stream_height;
+
+        // Get color based on label
+        bbox_color_t color;
+        if (strcmp(overlay->class, "bed") == 0) {
+            color = BOUNDING_BOX_COLOR_GREEN;
+        } else if (strcmp(overlay->class, "chair") == 0) {
+            color = BOUNDING_BOX_COLOR_BLUE;
+        } else {
+            color = BOUNDING_BOX_COLOR_RED;
+        }
+
+        bbox_color(bounding_box, color);
+
+        // syslog(LOG_INFO,
+        //        "Drawing bounding with index %zd score %f, label %s, color: %p, crop x/y/w/h:
+        //        "
+        //        "%d %d "
+        //        "%d %d, "
+        //        "box at l/t/r/b: l%f t%f r%f b%f",
+        //        i,
+        //        object_box->score,
+        //        labels[object_box->label - 1],
+        //        (void*)&color,
+        //        crop_x,
+        //        crop_y,
+        //        crop_w,
+        //        crop_h,
+        //        box_left,
+        //        box_top,
+        //        box_right,
+        //        box_bottom);
+
+        // bbox_rectangle(bounding_box,
+        //                left,
+        //                top,
+        //                right,
+        //                bottom);  // TODO: THIS ONE DEFINITELY DOESNT WORK: Try one below
+        bbox_rectangle(bounding_box, box_left, box_top, box_right, box_bottom);
+    }
+
+    syslog(LOG_INFO, "Done looping, drawing boxes");
+    // Draw bounding boxes
+    if (!bbox_commit(bounding_box, 0u)) {
+        syslog(LOG_INFO, "Failed to draw bounding boxes: %s", strerror(errno));
+    }
+
+    syslog(LOG_INFO, "Drew bboxes");
+}
+
+static gboolean draw_cv25_overlay_timeout_callback(gpointer user_data) {
+    (void)user_data;
+    syslog(LOG_INFO, "Draw cv25 callback");
+
+    draw_cv25_overlay();
+
+    return TRUE;
+}
+
+#endif
+// END BBOX
+
 /**
  * @brief Main function that starts a stream with different options.
  */
@@ -1062,7 +1187,7 @@ int main(int argc, char** argv) {
     labelsFile         = args.labelsFile;
     inputWidth         = args.width;
     inputHeight        = args.height;
-    desiredHDImgWidth  = 1080;  // args.raw_width;
+    desiredHDImgWidth  = 1280;  // args.raw_width;
     desiredHDImgHeight = 720;   // args.raw_height;
     threshold          = 0;     // TODO: Removed: args.threshold;
     quality            = args.quality;
@@ -1562,6 +1687,10 @@ int main(int argc, char** argv) {
 
     // Start animation timer
     g_timeout_add_seconds(5, update_overlay_cb, NULL);
+#endif
+
+#ifdef ENABLE_CV25_OVERLAY
+    g_timeout_add_seconds(5, draw_cv25_overlay_timeout_callback, NULL);
 #endif
 
     // END INIT AXOVERLAY ------------------------------
