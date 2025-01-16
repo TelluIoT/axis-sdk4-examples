@@ -61,6 +61,8 @@
 #include "vdo-frame.h"
 #include "vdo-types.h"
 
+#define SLEEP_PERIOD_MS 2000
+
 // FOR AXOVERLAY
 #ifdef ENABLE_OVERLAY
 #include <axoverlay.h>
@@ -169,7 +171,12 @@ int threshold;
 int quality;
 
 #ifdef ENABLE_CV25_OVERLAY
-bbox_t* bounding_box = NULL;
+bbox_t* overlay = NULL;
+
+bbox_color_t BOUNDING_BOX_COLOR_RED;
+bbox_color_t BOUNDING_BOX_COLOR_GREEN;
+bbox_color_t BOUNDING_BOX_COLOR_BLUE;
+bbox_color_t BOUNDING_BOX_COLOR_BLACK;
 #endif
 
 // AXOVERLAY
@@ -1063,108 +1070,67 @@ static gboolean detect_objects_timeout_callback(gpointer user_data) {
 #ifdef ENABLE_CV25_OVERLAY
 
 static void draw_cv25_overlay(void) {
-    syslog(LOG_INFO, "about to draw cv25 overlay");
-    // Remove stuff from last frame (TODO: probably way better ways of doing this)
-    if (bounding_box) {
-        bbox_destroy(bounding_box);
-    }
-
-    syslog(LOG_INFO, "making bbox");
-
-    // bounding_box = bbox_new(2u, 1u, 2u);
-    bounding_box = bbox_view_new(1u);
-    if (!bounding_box) {
+    // ALTERNATIVE 1 ------------
+    bbox_destroy(overlay);
+    overlay = bbox_view_new(1u);
+    if (!overlay) {
         syslog(LOG_INFO, "Failed creating bbox: %s", strerror(errno));
     }
 
-    syslog(LOG_INFO, "setting output");
-
     // If camera lacks video output, this call will succeed but not do anything.
-    if (!bbox_video_output(bounding_box, true)) {
+    if (!bbox_video_output(overlay, true)) {
         syslog(LOG_INFO, "Failed enabling video-output for bbox: %s", strerror(errno));
     }
+    // END ALTERNATIVE 1 ---------------------
 
-    // TODO: Not sure how much of this needs to be done on every draw call
-    // Draw on channel 1 and 2 (TODO: not sure what this means)
+    // BEGIN ALTERNATIVE2
+    /*
+    bbox_clear(overlay);
+    if (!bbox_commit(overlay, 0u)) {
+        syslog(LOG_INFO, "Failed to clear bounding boxes: %s", strerror(errno));
+    }
+    */
+    // END ALTERNATIVE2 -------------------------
 
-    // bbox_coordinates_frame_normalized(bounding_box);  // TODO: not sure if this should be
-    // used
-
-    syslog(LOG_INFO, "Setting colors");
-
-    bbox_color_t BOUNDING_BOX_COLOR_RED   = bbox_color_from_rgb(0xff, 0x0, 0x0);
-    bbox_color_t BOUNDING_BOX_COLOR_GREEN = bbox_color_from_rgb(0x0, 0xff, 0x0);
-    bbox_color_t BOUNDING_BOX_COLOR_BLUE  = bbox_color_from_rgb(0x0, 0x0, 0xff);
-    bbox_color_t BOUNDING_BOX_COLOR_BLACK = bbox_color_from_rgb(0xff, 0xff, 0xff);
-
-    bbox_thickness_medium(bounding_box);
-
-    syslog(LOG_INFO, "looping over objects");
+    bbox_thickness_medium(overlay);
 
     for (size_t i = 0; i < object_overlays_length; i++) {
-        ObjectOverlay* overlay = &object_overlays[i];
+        ObjectOverlay* object = &object_overlays[i];
 
         // Normalize screen coords
-        float box_left   = overlay->left / (float)stream_width;
-        float box_top    = overlay->top / (float)stream_height;
-        float box_right  = overlay->right / (float)stream_width;
-        float box_bottom = overlay->bottom / (float)stream_height;
+        float box_left   = object->left / (float)stream_width;
+        float box_top    = object->top / (float)stream_height;
+        float box_right  = object->right / (float)stream_width;
+        float box_bottom = object->bottom / (float)stream_height;
 
         // Set outline based on score
-        if (overlay->score >= OVERLAY_SCORE_THRESHOLD) {
-            bbox_style_outline(bounding_box);
+        if (object->score >= OVERLAY_SCORE_THRESHOLD) {
+            bbox_style_outline(overlay);
         } else {
             // Switch to thick corner style
-            bbox_style_corners(bounding_box);
+            bbox_style_corners(overlay);
         }
 
         // Get color based on label
         bbox_color_t color;
-        if (strcmp(overlay->class, "bed") == 0) {
+        if (strcmp(object->class, "bed") == 0) {
             color = BOUNDING_BOX_COLOR_GREEN;
-        } else if (strcmp(overlay->class, "chair") == 0) {
+        } else if (strcmp(object->class, "chair") == 0) {
             color = BOUNDING_BOX_COLOR_BLUE;
-        } else if (strcmp(overlay->class, "person") == 0) {
+        } else if (strcmp(object->class, "person") == 0) {
             color = BOUNDING_BOX_COLOR_RED;
         } else {
             color = BOUNDING_BOX_COLOR_BLACK;
         }
-        bbox_color(bounding_box, color);
+        bbox_color(overlay, color);
 
-        // syslog(LOG_INFO,
-        //        "Drawing bounding with index %zd score %f, label %s, color: %p, crop x/y/w/h:
-        //        "
-        //        "%d %d "
-        //        "%d %d, "
-        //        "box at l/t/r/b: l%f t%f r%f b%f",
-        //        i,
-        //        object_box->score,
-        //        labels[object_box->label - 1],
-        //        (void*)&color,
-        //        crop_x,
-        //        crop_y,
-        //        crop_w,
-        //        crop_h,
-        //        box_left,
-        //        box_top,
-        //        box_right,
-        //        box_bottom);
-
-        // bbox_rectangle(bounding_box,
-        //                left,
-        //                top,
-        //                right,
-        //                bottom);  // TODO: THIS ONE DEFINITELY DOESNT WORK: Try one below
-        bbox_rectangle(bounding_box, box_left, box_top, box_right, box_bottom);
+        bbox_rectangle(overlay, box_left, box_top, box_right, box_bottom);
     }
 
-    syslog(LOG_INFO, "Done looping, drawing boxes");
     // Draw bounding boxes
-    if (!bbox_commit(bounding_box, 0u)) {
+    if (!bbox_commit(overlay, 0u)) {
         syslog(LOG_INFO, "Failed to draw bounding boxes: %s", strerror(errno));
     }
-
-    syslog(LOG_INFO, "Drew bboxes");
 }
 
 static gboolean draw_cv25_overlay_timeout_callback(gpointer user_data) {
@@ -1584,6 +1550,25 @@ int main(int argc, char** argv) {
         goto end;
     }
 
+    // BEGIN INIT BBOX
+#ifdef ENABLE_CV25_OVERLAY
+    overlay = bbox_view_new(1u);
+    if (!overlay) {
+        syslog(LOG_INFO, "Failed creating bbox: %s", strerror(errno));
+    }
+
+    // If camera lacks video output, this call will succeed but not do anything.
+    if (!bbox_video_output(overlay, true)) {
+        syslog(LOG_INFO, "Failed enabling video-output for bbox: %s", strerror(errno));
+    }
+
+    BOUNDING_BOX_COLOR_RED   = bbox_color_from_rgb(0xff, 0x0, 0x0);
+    BOUNDING_BOX_COLOR_GREEN = bbox_color_from_rgb(0x0, 0xff, 0x0);
+    BOUNDING_BOX_COLOR_BLUE  = bbox_color_from_rgb(0x0, 0x0, 0xff);
+    BOUNDING_BOX_COLOR_BLACK = bbox_color_from_rgb(0xff, 0xff, 0xff);
+#endif
+// END INIT BBOX
+
 // BEGIN INIT AXOVERLAY ------------------------------
 #ifdef ENABLE_OVERLAY
     GError* overlay_error = NULL;
@@ -1696,16 +1681,16 @@ int main(int argc, char** argv) {
     }
 
     // Start animation timer
-    g_timeout_add_seconds(5, update_overlay_cb, NULL);
+    g_timeout_add(SLEEP_PERIOD_MS, update_overlay_cb, NULL);
 #endif
 
 #ifdef ENABLE_CV25_OVERLAY
-    g_timeout_add_seconds(5, draw_cv25_overlay_timeout_callback, NULL);
+    g_timeout_add(SLEEP_PERIOD_MS, draw_cv25_overlay_timeout_callback, NULL);
 #endif
 
     // END INIT AXOVERLAY ------------------------------
 
-    g_timeout_add_seconds(5, detect_objects_timeout_callback, NULL);
+    g_timeout_add(SLEEP_PERIOD_MS, detect_objects_timeout_callback, NULL);
 
     // Enter main loop
     GMainLoop* main_loop = g_main_loop_new(NULL, FALSE);
