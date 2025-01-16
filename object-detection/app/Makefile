@@ -4,8 +4,8 @@ PROGS	= $(PROG1)
 LIBDIR = lib
 LIBJPEG_TURBO = /opt/build/libjpeg-turbo/build
 
-# ENABLE_OVERLAY = ""
-ENABLE_CV25_OVERLAY = ""
+ENABLE_OVERLAY = ""
+# ENABLE_CV25_OVERLAY = ""
 
 PKGS = glib-2.0 gio-2.0 gio-unix-2.0 liblarod vdostream cairo # cairo added for overlay
 

@@ -61,7 +61,8 @@
 #include "vdo-frame.h"
 #include "vdo-types.h"
 
-#define SLEEP_PERIOD_MS 2000
+// NOTE: IF TOO LOW ON 1075: BBOXES WILL NOT APPEAR
+#define SLEEP_PERIOD_MS 250
 
 // FOR AXOVERLAY
 #ifdef ENABLE_OVERLAY
@@ -205,25 +206,6 @@ typedef struct {
 #define OBJECT_OVERLAYS_MAX_LENGTH 5
 size_t object_overlays_length = 0;
 ObjectOverlay object_overlays[5];
-
-// static gint animation_timer = -1;
-// static gint overlay_id      = -1;
-// static gint overlay_id_text = -1;
-// static gint counter = 10;
-// static gint top_color = 1;
-// static gint bottom_color    = 3;
-
-// HACKY ADDED GLOBALS
-// static gboolean has_object = FALSE;
-// static gint object_top    = 0;
-// static gint object_bottom = 0;
-// static gint object_left   = 0;
-// static gint object_right  = 0;
-
-// static gint object_top_2    = 0;
-// static gint object_bottom_2 = 0;
-// static gint object_left_2   = 0;
-// static gint object_right_2  = 0;
 
 // TODO: these end up being set in some callback function atm .super hacky
 static gint stream_width  = 1280;
@@ -504,7 +486,7 @@ static void render_overlay_cb(gpointer rendering_context,
                            overlay->top,
                            overlay->right,
                            overlay->bottom,
-                           1,
+                           overlay->score >= OVERLAY_SCORE_THRESHOLD ? 2 : 1,
                            5);
         } else if (id == overlay->text_id) {
             draw_text(rendering_context,
@@ -528,15 +510,6 @@ static gboolean update_overlay_cb(gpointer user_data) {
     (void)user_data;
 
     GError* error = NULL;
-
-    // Countdown
-    counter = counter < 1 ? 10 : counter - 1;
-
-    // if (counter == 0) {
-    //     // A small color surprise
-    //     top_color    = top_color > 2 ? 1 : top_color + 1;
-    //     bottom_color = bottom_color > 2 ? 1 : bottom_color + 1;
-    // }
 
     // Request a redraw of the overlay
     axoverlay_redraw(&error);
