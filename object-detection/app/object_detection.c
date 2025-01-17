@@ -193,6 +193,11 @@ bbox_color_t BOUNDING_BOX_COLOR_BLACK;
 
 // ------------------------------------------------------------------------------------------------------------------------
 // GLOBALS AXOVERLAY
+#ifdef ENABLE_OVERLAY
+struct axoverlay_overlay_data ax_overlay_data;
+gint ax_overlay_id;
+#endif
+
 #define PALETTE_VALUE_RANGE 255.0
 
 typedef struct {
@@ -202,17 +207,11 @@ typedef struct {
     gint right;
     char class[50];
     float score;
-    gint bounding_box_id;
-    gint text_id;
-#ifdef ENABLE_OVERLAY
-    struct axoverlay_overlay_data bounding_box;
-    struct axoverlay_overlay_data text;
-#endif
-} ObjectOverlay;
+} ObjectOverlay;  // TODO: rename
 
-#define OBJECT_OVERLAYS_MAX_LENGTH 5
+#define OBJECT_OVERLAYS_MAX_LENGTH 1000
 size_t object_overlays_length = 0;
-ObjectOverlay object_overlays[5];
+ObjectOverlay object_overlays[OBJECT_OVERLAYS_MAX_LENGTH];
 
 // TODO: these end up being set in some callback function atm .super hacky
 static gint stream_width  = 1280;
@@ -230,6 +229,9 @@ static void get_coordinates(int* out_top,
                             float right) {
     unsigned int croppedWidthHD = heightFrameHD;
     // unsigned int crop_x         = left * croppedWidthHD + (widthFrameHD - heightFrameHD) / 2;
+    (void)frame_width;  // TODO: think global HeightFrameHD/widthHD are currently being used here.
+                        // Probably completely unnecessary
+    (void)frame_height;
 
     unsigned int crop_x_offset;
     if (pp_req_index == 0) {
@@ -260,18 +262,18 @@ static void get_coordinates(int* out_top,
     // *out_bottom = round(bottom * frame_height);
     // *out_right  = round(right * frame_width);
 
-    syslog(LOG_INFO,
-           "Width: %d Height %d Top: %f->%d Left: %f->%d Bottom: %f->%d Right: %f->%d",
-           frame_width,
-           frame_height,
-           top,
-           *out_top,
-           left,
-           *out_left,
-           bottom,
-           *out_bottom,
-           right,
-           *out_right);
+    // syslog(LOG_INFO,
+    //        "Width: %d Height %d Top: %f->%d Left: %f->%d Bottom: %f->%d Right: %f->%d",
+    //        frame_width,
+    //        frame_height,
+    //        top,
+    //        *out_top,
+    //        left,
+    //        *out_left,
+    //        bottom,
+    //        *out_bottom,
+    //        right,
+    //        *out_right);
 }
 #endif
 
@@ -494,10 +496,10 @@ static void render_overlay_cb(gpointer rendering_context,
     // syslog(LOG_INFO, "Render callback for overlay: %i x %i", overlay_width, overlay_height);
     // syslog(LOG_INFO, "Render callback for stream: %i x %i", stream->width, stream->height);
 
-    for (size_t i = 0; i < object_overlays_length; i++) {
-        ObjectOverlay* overlay = &object_overlays[i];
+    if (id == ax_overlay_id) {  // TODO: no idea if this is ever not the case
+        for (size_t i = 0; i < object_overlays_length; i++) {
+            ObjectOverlay* overlay = &object_overlays[i];
 
-        if (id == overlay->bounding_box_id) {
             draw_rectangle(rendering_context,
                            overlay->left,
                            overlay->top,
@@ -505,12 +507,14 @@ static void render_overlay_cb(gpointer rendering_context,
                            overlay->bottom,
                            overlay->score >= OVERLAY_SCORE_THRESHOLD ? 2 : 1,
                            5);
-        } else if (id == overlay->text_id) {
+
             draw_text(rendering_context,
                       g_strdup_printf("%s (%f)", overlay->class, overlay->score),
                       overlay->left + ((overlay->right - overlay->left) / 2),
                       overlay->top + ((overlay->bottom - overlay->top) / 2));
         }
+    } else {
+        syslog(LOG_INFO, "ErROR: Unknown overlay id: %d", id);
     }
 }
 
@@ -828,21 +832,16 @@ end:
     return ret;
 }
 
-static gboolean next_clip_x_timeout_callback(gpointer user_data) {
-    (void)user_data;
-    pp_req_index = (pp_req_index + 1) % pp_reqs_length;
+// static gboolean next_clip_x_timeout_callback(gpointer user_data) {
+//     (void)user_data;
+//     pp_req_index = (pp_req_index + 1) % pp_reqs_length;
 
-    return TRUE;
-}
+//     return TRUE;
+// }
 
 static gboolean detect_objects(void) {
     struct timeval startTs, endTs;
     unsigned int elapsedMs = 0;
-
-    // TODO: REMOVE: TESTING SWAPPING PPREQ DURING RUNTIME
-    ppReq = ppReqs[pp_req_index];
-
-    // -------------------------------------
 
     syslog(LOG_INFO, "--------------------------------------------");
 
@@ -866,93 +865,139 @@ static gboolean detect_objects(void) {
     // Covert image data from NV12 format to interleaved uint8_t RGB format.
     gettimeofday(&startTs, NULL);
 
-    memcpy(ppInputAddr, nv12Data, yuyvBufferSize);
-    if (!larodRunJob(conn, ppReq, &error)) {
-        syslog(LOG_ERR, "Unable to run job to preprocess model: %s (%d)", error->msg, error->code);
-        return FALSE;
-    }
-    memcpy(ppInputAddrHD, nv12Data_hq, widthFrameHD * heightFrameHD * CHANNELS / 2);
-    if (!larodRunJob(conn, ppReqHD, &error)) {
-        syslog(LOG_ERR, "Unable to run job to preprocess model: %s (%d)", error->msg, error->code);
-        return FALSE;
-    }
+    object_overlays_length = 0;
 
-    gettimeofday(&endTs, NULL);
+    // This is unbelievably hacky: Updating pp_req_index so that getCoordinates will change as well
+    for (pp_req_index = 0; pp_req_index < pp_reqs_length; pp_req_index++) {
+        larodJobRequest* ppReq = ppReqs[pp_req_index];
 
-    elapsedMs = (unsigned int)(((endTs.tv_sec - startTs.tv_sec) * 1000) +
-                               ((endTs.tv_usec - startTs.tv_usec) / 1000));
-    syslog(LOG_INFO, "Converted image in %u ms", elapsedMs);
+        memcpy(ppInputAddr, nv12Data, yuyvBufferSize);
+        if (!larodRunJob(conn, ppReq, &error)) {
+            syslog(LOG_ERR,
+                   "Unable to run job to preprocess model: %s (%d)",
+                   error->msg,
+                   error->code);
+            return FALSE;
+        }
+        memcpy(ppInputAddrHD, nv12Data_hq, widthFrameHD * heightFrameHD * CHANNELS / 2);
+        if (!larodRunJob(conn, ppReqHD, &error)) {
+            syslog(LOG_ERR,
+                   "Unable to run job to preprocess model: %s (%d)",
+                   error->msg,
+                   error->code);
+            return FALSE;
+        }
 
-    // Since larodOutputAddr points to the beginning of the fd we should
-    // rewind the file position before each job.
-    if (lseek(larodOutput1Fd, 0, SEEK_SET) == -1) {
-        syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
-        return FALSE;
-    }
+        gettimeofday(&endTs, NULL);
 
-    if (lseek(larodOutput2Fd, 0, SEEK_SET) == -1) {
-        syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
-        return FALSE;
-    }
+        elapsedMs = (unsigned int)(((endTs.tv_sec - startTs.tv_sec) * 1000) +
+                                   ((endTs.tv_usec - startTs.tv_usec) / 1000));
+        syslog(LOG_INFO, "Converted image in %u ms", elapsedMs);
 
-    if (lseek(larodOutput3Fd, 0, SEEK_SET) == -1) {
-        syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
-        return FALSE;
-    }
+        // Since larodOutputAddr points to the beginning of the fd we should
+        // rewind the file position before each job.
+        if (lseek(larodOutput1Fd, 0, SEEK_SET) == -1) {
+            syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
+            return FALSE;
+        }
 
-    if (lseek(larodOutput4Fd, 0, SEEK_SET) == -1) {
-        syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
-        return FALSE;
-    }
+        if (lseek(larodOutput2Fd, 0, SEEK_SET) == -1) {
+            syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
+            return FALSE;
+        }
 
-    gettimeofday(&startTs, NULL);
-    if (!larodRunJob(conn, infReq, &error)) {
-        syslog(LOG_ERR,
-               "Unable to run inference on model %s: %s (%d)",
-               labelsFile,
-               error->msg,
-               error->code);
-        return FALSE;
-    }
-    gettimeofday(&endTs, NULL);
+        if (lseek(larodOutput3Fd, 0, SEEK_SET) == -1) {
+            syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
+            return FALSE;
+        }
 
-    elapsedMs = (unsigned int)(((endTs.tv_sec - startTs.tv_sec) * 1000) +
-                               ((endTs.tv_usec - startTs.tv_usec) / 1000));
-    syslog(LOG_INFO, "Ran inference for %u ms", elapsedMs);
+        if (lseek(larodOutput4Fd, 0, SEEK_SET) == -1) {
+            syslog(LOG_ERR, "Unable to rewind output file position: %s", strerror(errno));
+            return FALSE;
+        }
 
-    float* locations          = (float*)larodOutput1Addr;
-    float* classes            = (float*)larodOutput2Addr;
-    float* scores             = (float*)larodOutput3Addr;
-    float* numberOfDetections = (float*)larodOutput4Addr;
+        gettimeofday(&startTs, NULL);
+        if (!larodRunJob(conn, infReq, &error)) {
+            syslog(LOG_ERR,
+                   "Unable to run inference on model %s: %s (%d)",
+                   labelsFile,
+                   error->msg,
+                   error->code);
+            return FALSE;
+        }
+        gettimeofday(&endTs, NULL);
 
-    if ((int)numberOfDetections[0] == 0) {
-        syslog(LOG_INFO, "No object is detected");
-        return TRUE;
-    }
+        elapsedMs = (unsigned int)(((endTs.tv_sec - startTs.tv_sec) * 1000) +
+                                   ((endTs.tv_usec - startTs.tv_usec) / 1000));
+        syslog(LOG_INFO, "Ran inference for %u ms", elapsedMs);
 
-    for (int i = 0; i < numberOfDetections[0]; i++) {
-        float top    = locations[4 * i];
-        float left   = locations[4 * i + 1];
-        float bottom = locations[4 * i + 2];
-        float right  = locations[4 * i + 3];
+        float* locations          = (float*)larodOutput1Addr;
+        float* classes            = (float*)larodOutput2Addr;
+        float* scores             = (float*)larodOutput3Addr;
+        float* numberOfDetections = (float*)larodOutput4Addr;
 
-        unsigned int croppedWidthHD = heightFrameHD;
+        if ((int)numberOfDetections[0] == 0) {
+            syslog(LOG_INFO, "No object is detected");
+            return TRUE;
+        }
 
-        unsigned int crop_x = left * croppedWidthHD + (widthFrameHD - heightFrameHD) / 2;
-        unsigned int crop_y = top * heightFrameHD;
-        unsigned int crop_w = (right - left) * croppedWidthHD;
-        unsigned int crop_h = (bottom - top) * heightFrameHD;
+        int object_count = numberOfDetections[0] <= 20 ? numberOfDetections[0] : 20;
 
-        if (scores[i] >= threshold / 100.0) {
-            syslog(LOG_INFO,
-                   "Object %d: Classes: %s - Scores: %f - Locations: [%f,%f,%f,%f]",
-                   i,
-                   labels[(int)classes[i]],
-                   scores[i],
-                   top,
-                   left,
-                   bottom,
-                   right);
+        for (int i = 0; i < object_count; i++) {
+            float top    = locations[4 * i];
+            float left   = locations[4 * i + 1];
+            float bottom = locations[4 * i + 2];
+            float right  = locations[4 * i + 3];
+
+            unsigned int croppedWidthHD = heightFrameHD;
+
+            unsigned int crop_x = left * croppedWidthHD + (widthFrameHD - heightFrameHD) / 2;
+            unsigned int crop_y = top * heightFrameHD;
+            unsigned int crop_w = (right - left) * croppedWidthHD;
+            unsigned int crop_h = (bottom - top) * heightFrameHD;
+
+            if (scores[i] >= threshold / 100.0) {
+                syslog(LOG_INFO,
+                       "Object %d: Classes: %s - Scores: %f - Locations: [%f,%f,%f,%f]",
+                       i,
+                       labels[(int)classes[i]],
+                       scores[i],
+                       top,
+                       left,
+                       bottom,
+                       right);
+
+                // ADDED: UPDATE DRAW BOX LOCATION FOR FIRST OBJECT ---------3
+#if defined(ENABLE_OVERLAY) || defined(ENABLE_CV25_OVERLAY)
+                syslog(LOG_INFO,
+                       "Desired HDImageHeight/Width %dx%d, height/WidthFrameHd: %dx%d",
+                       desiredHDImgHeight,
+                       desiredHDImgWidth,
+                       heightFrameHD,
+                       widthFrameHD);
+
+                ObjectOverlay* overlay = &object_overlays[object_overlays_length++];
+
+                float top    = locations[4 * i];
+                float left   = locations[4 * i + 1];
+                float bottom = locations[4 * i + 2];
+                float right  = locations[4 * i + 3];
+
+                get_coordinates(&overlay->top,
+                                &overlay->left,
+                                &overlay->bottom,
+                                &overlay->right,
+                                stream_width,
+                                stream_height,
+                                top,
+                                left,
+                                bottom,
+                                right);
+
+                strcpy(overlay->class, labels[(int)classes[i]]);
+                overlay->score = scores[i];
+            }
+#endif
 
             unsigned char* crop_buffer = crop_interleaved(ppOutputAddrHD,
                                                           widthFrameHD,
@@ -975,86 +1020,6 @@ static gboolean detect_objects(void) {
             free(jpeg_buffer);
         }
     }
-
-// ADDED: UPDATE DRAW BOX LOCATION FOR FIRST OBJECT ---------3
-#if defined(ENABLE_OVERLAY) || defined(ENABLE_CV25_OVERLAY)
-    syslog(LOG_INFO,
-           "Desired HDImageHeight/Width %dx%d, height/WidthFrameHd: %dx%d",
-           desiredHDImgHeight,
-           desiredHDImgWidth,
-           heightFrameHD,
-           widthFrameHD);
-
-    object_overlays_length = numberOfDetections[0] < OBJECT_OVERLAYS_MAX_LENGTH
-                                 ? numberOfDetections[0]
-                                 : OBJECT_OVERLAYS_MAX_LENGTH;
-
-    for (size_t i = 0; i < object_overlays_length; i++) {
-        ObjectOverlay* overlay = &object_overlays[i];
-
-        float top    = locations[4 * i];
-        float left   = locations[4 * i + 1];
-        float bottom = locations[4 * i + 2];
-        float right  = locations[4 * i + 3];
-
-        get_coordinates(&overlay->top,
-                        &overlay->left,
-                        &overlay->bottom,
-                        &overlay->right,
-                        stream_width,
-                        stream_height,
-                        top,
-                        left,
-                        bottom,
-                        right);
-
-        strcpy(overlay->class, labels[(int)classes[i]]);
-        overlay->score = scores[i];
-    }
-
-    // float top_1    = locations[4 * 0];
-    // float left_1   = locations[4 * 0 + 1];
-    // float bottom_1 = locations[4 * 0 + 2];
-    // float right_1  = locations[4 * 0 + 3];
-
-    // get_coordinates(&object_top,
-    //                 &object_left,
-    //                 &object_bottom,
-    //                 &object_right,
-    //                 stream_width,
-    //                 stream_height,
-    //                 top_1,
-    //                 left_1,
-    //                 bottom_1,
-    //                 right_1);
-
-    // float top_2    = locations[4 * 1];
-    // float left_2   = locations[4 * 1 + 1];
-    // float bottom_2 = locations[4 * 1 + 2];
-    // float right_2  = locations[4 * 1 + 3];
-
-    // get_coordinates(&object_top_2,
-    //                 &object_left_2,
-    //                 &object_bottom_2,
-    //                 &object_right_2,
-    //                 stream_width,
-    //                 stream_height,
-    //                 top_2,
-    //                 left_2,
-    //                 bottom_2,
-    //                 right_2);
-
-    // syslog(LOG_INFO,
-    //        "top1/2: %d %d, left1/2: %d %d, bot1/2: %d %d, right1/2: %d %d",
-    //        object_top,
-    //        object_top_2,
-    //        object_left,
-    //        object_left_2,
-    //        object_bottom,
-    //        object_bottom_2,
-    //        object_right,
-    //        object_right_2);
-#endif
 
     // Release frame reference to provider.
     returnFrame(sdImageProvider, buf);
@@ -1173,7 +1138,7 @@ int main(int argc, char** argv) {
     inputHeight        = args.height;
     desiredHDImgWidth  = 1280;  // args.raw_width;
     desiredHDImgHeight = 720;   // args.raw_height;
-    threshold          = 0;     // TODO: Removed: args.threshold;
+    threshold          = 20;    // TODO: Removed: args.threshold;
     quality            = args.quality;
 
     syslog(LOG_INFO,
@@ -1687,6 +1652,13 @@ int main(int argc, char** argv) {
     //     return 1;
     // }
 
+    setup_axoverlay_data(&ax_overlay_data);
+    ax_overlay_data.width      = camera_width;
+    ax_overlay_data.height     = camera_height;
+    ax_overlay_data.colorspace = AXOVERLAY_COLORSPACE_4BIT_PALETTE;
+    ax_overlay_id              = axoverlay_create_overlay(&ax_overlay_data, NULL, &overlay_error);
+
+    /*
     for (int i = 0; i < OBJECT_OVERLAYS_MAX_LENGTH; i++) {
         ObjectOverlay* object = &object_overlays[i];
 
@@ -1716,6 +1688,7 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    */
 
     // Create an text overlay using ARGB32 color space
     // struct axoverlay_overlay_data data_text;
@@ -1755,7 +1728,7 @@ int main(int argc, char** argv) {
     g_timeout_add(SLEEP_PERIOD_MS, detect_objects_timeout_callback, NULL);
 
     // TODO: Remove: testing adjusting cropmap during runtime
-    g_timeout_add(10 * 1000, next_clip_x_timeout_callback, NULL);
+    // g_timeout_add(10 * 1000, next_clip_x_timeout_callback, NULL);
 
     // Enter main loop
     GMainLoop* main_loop = g_main_loop_new(NULL, FALSE);
