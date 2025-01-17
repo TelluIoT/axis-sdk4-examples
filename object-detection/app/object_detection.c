@@ -78,7 +78,7 @@
 
 static unsigned int test_clip_x[3];
 static unsigned int pp_req_index   = 0;
-static unsigned int pp_reqs_length = 2;
+static unsigned int pp_reqs_length = 3;
 
 static larodMap* cropMaps[3];
 static larodJobRequest* ppReqs[3];
@@ -237,7 +237,7 @@ static void get_coordinates(int* out_top,
     } else if (pp_req_index == 1) {
         crop_x_offset = (1280 / 2) - (720 / 2);
     } else {
-        crop_x_offset = (1280 / 2) + (720 / 2);
+        crop_x_offset = 1280 - 720;
     }
     unsigned int crop_x = left * croppedWidthHD + crop_x_offset;  // TODO: REPLACE
     unsigned int crop_y = top * heightFrameHD;
@@ -1163,6 +1163,7 @@ int main(int argc, char** argv) {
     // TODO: REMOVE: TESTING ADJUSTING CLIPX DURING RUNTIME
     test_clip_x[0] = 0;
     test_clip_x[1] = (1280 / 2) - (720 / 2);
+    test_clip_x[2] = 1280 - 720;
     // -------------------
 
     chipString         = args.chip;
