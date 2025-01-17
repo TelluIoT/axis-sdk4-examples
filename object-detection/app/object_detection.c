@@ -62,7 +62,7 @@
 #include "vdo-types.h"
 
 // NOTE: IF TOO LOW ON 1075: BBOXES WILL NOT APPEAR
-#define SLEEP_PERIOD_MS 250
+#define SLEEP_PERIOD_MS 2000
 
 // FOR AXOVERLAY
 #ifdef ENABLE_OVERLAY
@@ -75,6 +75,13 @@
 #include <bbox.h>
 #include <math.h>
 #endif
+
+static unsigned int test_clip_x[3];
+static unsigned int pp_req_index   = 0;
+static unsigned int pp_reqs_length = 2;
+
+static larodMap* cropMaps[3];
+static larodJobRequest* ppReqs[3];
 
 // GLOBALS OBJDETECTION
 // TODO: COPIED OUT OF MAIN
@@ -222,10 +229,20 @@ static void get_coordinates(int* out_top,
                             float bottom,
                             float right) {
     unsigned int croppedWidthHD = heightFrameHD;
-    unsigned int crop_x         = left * croppedWidthHD + (widthFrameHD - heightFrameHD) / 2;
-    unsigned int crop_y         = top * heightFrameHD;
-    unsigned int crop_w         = (right - left) * croppedWidthHD;
-    unsigned int crop_h         = (bottom - top) * heightFrameHD;
+    // unsigned int crop_x         = left * croppedWidthHD + (widthFrameHD - heightFrameHD) / 2;
+
+    unsigned int crop_x_offset;
+    if (pp_req_index == 0) {
+        crop_x_offset = 0;
+    } else if (pp_req_index == 1) {
+        crop_x_offset = (1280 / 2) - (720 / 2);
+    } else {
+        crop_x_offset = (1280 / 2) + (720 / 2);
+    }
+    unsigned int crop_x = left * croppedWidthHD + crop_x_offset;  // TODO: REPLACE
+    unsigned int crop_y = top * heightFrameHD;
+    unsigned int crop_w = (right - left) * croppedWidthHD;
+    unsigned int crop_h = (bottom - top) * heightFrameHD;
 
     *out_top    = crop_y;
     *out_left   = crop_x;
@@ -811,9 +828,21 @@ end:
     return ret;
 }
 
+static gboolean next_clip_x_timeout_callback(gpointer user_data) {
+    (void)user_data;
+    pp_req_index = (pp_req_index + 1) % pp_reqs_length;
+
+    return TRUE;
+}
+
 static gboolean detect_objects(void) {
     struct timeval startTs, endTs;
     unsigned int elapsedMs = 0;
+
+    // TODO: REMOVE: TESTING SWAPPING PPREQ DURING RUNTIME
+    ppReq = ppReqs[pp_req_index];
+
+    // -------------------------------------
 
     syslog(LOG_INFO, "--------------------------------------------");
 
@@ -1131,6 +1160,11 @@ int main(int argc, char** argv) {
         goto earlyend;
     }
 
+    // TODO: REMOVE: TESTING ADJUSTING CLIPX DURING RUNTIME
+    test_clip_x[0] = 0;
+    test_clip_x[1] = (1280 / 2) - (720 / 2);
+    // -------------------
+
     chipString         = args.chip;
     modelFile          = args.modelFile;
     labelsFile         = args.labelsFile;
@@ -1140,6 +1174,19 @@ int main(int argc, char** argv) {
     desiredHDImgHeight = 720;   // args.raw_height;
     threshold          = 0;     // TODO: Removed: args.threshold;
     quality            = args.quality;
+
+    syslog(LOG_INFO,
+           "ARGS: chipstring: %s modelFile: %s labelsFile: %s inputWidth: %d inputHeight: %d "
+           "desiredHDImgWidth : %d desiredHdImgHeight: %d threshold: %d quality: %d ",
+           chipString,
+           modelFile,
+           labelsFile,
+           inputWidth,
+           inputHeight,
+           desiredHDImgWidth,
+           desiredHDImgHeight,
+           threshold,
+           quality);
 
     syslog(LOG_INFO,
            "Input width/height: %dx%d Desired img width/height %dx%d",
@@ -1155,6 +1202,11 @@ int main(int argc, char** argv) {
         syslog(LOG_ERR, "%s: Failed choosing stream resolution", __func__);
         goto end;
     }
+
+    // TODO: REMOVE: TESTING ORIG STREAM WIDTH
+    streamWidth  = 1280;
+    streamHeight = 720;
+    // -------------------------------------
 
     syslog(LOG_INFO,
            "Creating VDO image provider and creating stream %d x %d",
@@ -1465,18 +1517,54 @@ int main(int argc, char** argv) {
     }
 
     // Create job requests
-    syslog(LOG_INFO, "Create job requests");
-    ppReq = larodCreateJobRequest(ppModel,
-                                  ppInputTensors,
-                                  ppNumInputs,
-                                  ppOutputTensors,
-                                  ppNumOutputs,
-                                  cropMap,
-                                  &error);
-    if (!ppReq) {
-        syslog(LOG_ERR, "Failed creating preprocessing job request: %s", error->msg);
-        goto end;
+    // TODO: UNCOMMMENT: REMOVED TO CREATE 3 SEPARATE PPREQs
+    // syslog(LOG_INFO, "Create job requests");
+    // ppReq = larodCreateJobRequest(ppModel,
+    //                               ppInputTensors,
+    //                               ppNumInputs,
+    //                               ppOutputTensors,
+    //                               ppNumOutputs,
+    //                               cropMap,
+    //                               &error);
+    // if (!ppReq) {
+    //     syslog(LOG_ERR, "Failed creating preprocessing job request: %s", error->msg);
+    //     goto end;
+    // }
+    // ------------------------------------
+
+    // TODO: REMOVE: TESTING TO MAKE 3 ADDITIONAL PPREQS WITH NEW CROPMAPS -------------------------
+    for (unsigned int i = 0; i < pp_reqs_length; i++) {
+        cropMaps[i] = larodCreateMap(&error);
+        if (!cropMaps[i]) {
+            syslog(LOG_ERR, "Could not create preprocessing crop larodMap %s", error->msg);
+        }
+
+        if (!larodMapSetIntArr4(cropMaps[i],
+                                "image.input.crop",
+                                test_clip_x[i],
+                                clipY,
+                                clipW,
+                                clipH,
+                                &error)) {
+            syslog(LOG_ERR, "Failed setting preprocessing parameters: %s", error->msg);
+        }
+
+        ppReqs[i] = larodCreateJobRequest(ppModel,
+                                          ppInputTensors,
+                                          ppNumInputs,
+                                          ppOutputTensors,
+                                          ppNumOutputs,
+                                          cropMaps[i],
+                                          &error);
+
+        if (!ppReqs[0]) {
+            syslog(LOG_ERR, "Failed creating preprocessing job request: %s", error->msg);
+            goto end;
+        }
     }
+
+    // -----------------------------------------------------------
+
     ppReqHD = larodCreateJobRequest(ppModelHD,
                                     ppInputTensorsHD,
                                     ppNumInputsHD,
@@ -1664,6 +1752,9 @@ int main(int argc, char** argv) {
     // END INIT AXOVERLAY ------------------------------
 
     g_timeout_add(SLEEP_PERIOD_MS, detect_objects_timeout_callback, NULL);
+
+    // TODO: Remove: testing adjusting cropmap during runtime
+    g_timeout_add(10 * 1000, next_clip_x_timeout_callback, NULL);
 
     // Enter main loop
     GMainLoop* main_loop = g_main_loop_new(NULL, FALSE);
