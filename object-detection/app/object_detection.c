@@ -62,7 +62,7 @@
 #include "vdo-types.h"
 
 // NOTE: IF TOO LOW ON 1075: BBOXES WILL NOT APPEAR
-#define SLEEP_PERIOD_MS 2000
+#define SLEEP_PERIOD_MS 250
 
 // FOR AXOVERLAY
 #ifdef ENABLE_OVERLAY
@@ -344,7 +344,7 @@ static void draw_text(cairo_t* context, char* string, const gint pos_x, const gi
     //  Show text in black
     cairo_set_source_rgb(context, 0, 0, 0);
     cairo_select_font_face(context, "serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-    cairo_set_font_size(context, 15.0);
+    cairo_set_font_size(context, 25.0);
 
     // Position the text at a fix centered position
     cairo_text_extents(context, string, &te_length);
@@ -845,6 +845,8 @@ static gboolean detect_objects(void) {
 
     syslog(LOG_INFO, "--------------------------------------------");
 
+    gettimeofday(&startTs, NULL);
+
     // Get latest frame from image pipeline.
     VdoBuffer* buf = getLastFrameBlocking(sdImageProvider);
     if (!buf) {
@@ -863,7 +865,6 @@ static gboolean detect_objects(void) {
     uint8_t* nv12Data_hq = (uint8_t*)vdo_buffer_get_data(buf_hq);
 
     // Covert image data from NV12 format to interleaved uint8_t RGB format.
-    gettimeofday(&startTs, NULL);
 
     object_overlays_length = 0;
 
@@ -888,12 +889,6 @@ static gboolean detect_objects(void) {
             return FALSE;
         }
 
-        gettimeofday(&endTs, NULL);
-
-        elapsedMs = (unsigned int)(((endTs.tv_sec - startTs.tv_sec) * 1000) +
-                                   ((endTs.tv_usec - startTs.tv_usec) / 1000));
-        syslog(LOG_INFO, "Converted image in %u ms", elapsedMs);
-
         // Since larodOutputAddr points to the beginning of the fd we should
         // rewind the file position before each job.
         if (lseek(larodOutput1Fd, 0, SEEK_SET) == -1) {
@@ -916,7 +911,6 @@ static gboolean detect_objects(void) {
             return FALSE;
         }
 
-        gettimeofday(&startTs, NULL);
         if (!larodRunJob(conn, infReq, &error)) {
             syslog(LOG_ERR,
                    "Unable to run inference on model %s: %s (%d)",
@@ -925,11 +919,6 @@ static gboolean detect_objects(void) {
                    error->code);
             return FALSE;
         }
-        gettimeofday(&endTs, NULL);
-
-        elapsedMs = (unsigned int)(((endTs.tv_sec - startTs.tv_sec) * 1000) +
-                                   ((endTs.tv_usec - startTs.tv_usec) / 1000));
-        syslog(LOG_INFO, "Ran inference for %u ms", elapsedMs);
 
         float* locations          = (float*)larodOutput1Addr;
         float* classes            = (float*)larodOutput2Addr;
@@ -1024,6 +1013,11 @@ static gboolean detect_objects(void) {
     // Release frame reference to provider.
     returnFrame(sdImageProvider, buf);
     returnFrame(hdImageProvider, buf_hq);
+
+    gettimeofday(&endTs, NULL);
+    elapsedMs = (unsigned int)(((endTs.tv_sec - startTs.tv_sec) * 1000) +
+                               ((endTs.tv_usec - startTs.tv_usec) / 1000));
+    syslog(LOG_INFO, "Got objects from frame in %u ms", elapsedMs);
 
     return TRUE;
 }
